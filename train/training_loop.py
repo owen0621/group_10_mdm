@@ -27,6 +27,8 @@ from utils.model_util import load_model_wo_clip
 from data_loaders.humanml.scripts.motion_process import get_target_location, sample_goal, get_allowed_joint_options
 from utils.sampler_util import ClassifierFreeSampleModel
 
+import sys
+
 
 # For ImageNet experiments, this was a good default value.
 # We found that the lg_loss_scale quickly climbed to
@@ -65,6 +67,7 @@ class TrainLoop:
         self.global_batch = self.batch_size # * dist.get_world_size()
         self.num_steps = args.num_steps
         self.num_epochs = self.num_steps // len(self.data) + 1
+        print(f"num_epochs: {self.num_epochs}, num_steps: {self.num_steps}, global_batch: {self.global_batch}")
 
         self.sync_cuda = torch.cuda.is_available()
 
@@ -208,7 +211,7 @@ class TrainLoop:
         print('train steps:', self.num_steps)
         for epoch in range(self.num_epochs):
             print(f'Starting epoch {epoch}')
-            for motion, cond in tqdm(self.data):
+            for motion, cond in tqdm(self.data, disable=not sys.stdout.isatty()):
                 if not (not self.lr_anneal_steps or self.total_step() < self.lr_anneal_steps):
                     break
                 

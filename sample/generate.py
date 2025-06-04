@@ -215,7 +215,8 @@ def main(args=None):
     sample_file_template, row_file_template, all_file_template = construct_template_variables(args.unconstrained)
     max_vis_samples = 6
     num_vis_samples = min(args.num_samples, max_vis_samples)
-    animations = np.empty(shape=(args.num_samples, args.num_repetitions), dtype=object)
+    animations = np.empty(shape=(3, 3), dtype=object)
+    # animations = np.empty(shape=(args.num_samples, args.num_repetitions), dtype=object) #原版本
     max_length = max(all_lengths)
 
     for sample_i in range(args.num_samples):
@@ -244,6 +245,9 @@ def main(args=None):
                                                          fps=fps, gt_frames=gt_frames)
             rep_files.append(animation_save_path)
 
+    #TODO
+    total_samples = args.num_samples * args.num_repetitions
+    animations = animations.reshape(total_samples // 3, 3)
     save_multiple_samples(out_path, {'all': all_file_template}, animations, fps, max(list(all_lengths) + [n_frames]))
 
     abs_path = os.path.abspath(out_path)
