@@ -1,0 +1,5 @@
+"A person runs forward with quick steps"
+"A person transition into a spinning turn to the left"
+"A person immediately jump into the air with arms extended"
+"A person land smoothly"
+"A person continue with a side step to the right"

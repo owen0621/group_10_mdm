@@ -19,7 +19,6 @@ class LongMotionGenerator:
         self.args.batch_size = 1               # 一次只生成一個 clip
         self.max_frames = 196                  # 模型最大支援幀數
         self.fps = 12.5 if args.dataset == 'kit' else 20  
-        # 預設每段 clip 長度（秒）對應的幀數（但實際會再被 per_clip_seconds 覆蓋）
         self.clip_seconds = self.max_frames / self.fps  
 
         print("Loading model…")
@@ -36,13 +35,17 @@ class LongMotionGenerator:
         self.model.eval()
 
         # 骨架拓撲 (KIT 或 HumanML)
-        self.skeleton = (paramUtil.kit_kinematic_chain 
-                         if args.dataset == 'kit' 
-                         else paramUtil.t2m_kinematic_chain)
+        self.skeleton = (
+            paramUtil.kit_kinematic_chain 
+            if args.dataset == 'kit' 
+            else paramUtil.t2m_kinematic_chain
+        )
         self.prompt_splitter = PromptSplitter(model="gpt-4")
 
-        # overlap_frames：每段 clip 與下一段之間要「銜接」的幀數
-        self.overlap_frames = 10
+        # delete_frames：先刪尾 10 幀
+        self.delete_frames = 20
+        # supply_frames：從「刪除後剩餘部分」取最後 20 幀，供下一段 inpainting
+        self.supply_frames = 20
 
     def generate_from_prompt(self,
                              text_prompt: str,
@@ -50,47 +53,44 @@ class LongMotionGenerator:
                              per_clip_seconds: float,
                              output_path: str = "./long_motion.mp4"):
         """
-        :param text_prompt:      長影片的整段文字條件
+        :param text_prompt:      長影片的完整文字描述
         :param duration_seconds: 最終要生成的總時長（秒）
-        :param per_clip_seconds: 每個小 clip 的時長（秒），必須 ≤ max_frames/fps
+        :param per_clip_seconds: 每個小 clip 的時長（秒），必須 > (delete_frames + supply_frames) / fps
         :param output_path:      最後輸出影片檔路徑
         """
-        # 1) 根據 per_clip_seconds 算出用多少 frames
+        # 1) 根據 per_clip_seconds 算出 frames_per_clip
         frames_per_clip = int(round(per_clip_seconds * self.fps))
-        # 別超過模型最大支援幀數
         frames_per_clip = min(frames_per_clip, self.max_frames)
-        if frames_per_clip <= self.overlap_frames:
+        if frames_per_clip <= self.delete_frames + self.supply_frames:
             raise ValueError(
-                f"per_clip_seconds ({per_clip_seconds}s) * fps ({self.fps}) "
-                f"must exceed overlap_frames ({self.overlap_frames})!"
+                f"frames_per_clip ({frames_per_clip}) 必須大於 delete_frames + supply_frames ({self.delete_frames + self.supply_frames})!"
             )
 
-        # 2) 計算需要多少個 clip
+        # 2) 計算需要多少段 clip
         num_clips = int(math.ceil(duration_seconds / per_clip_seconds))
-        sub_prompts = self.prompt_splitter.split_prompt(text_prompt, num_clips)
+        sub_prompts = self.prompt_splitter.split_prompt(text_prompt, num_clips, with_duration=False)
 
         print(f"Generating {num_clips} clips for {duration_seconds}s "
-              f"({frames_per_clip} frames per clip)…")
+              f"({frames_per_clip} frames per clip; delete {self.delete_frames}, supply {self.supply_frames})…")
 
-        # 3) 取得 dataset iterator，並記得把每段 clip 的 lengths 設成 frames_per_clip
+        # 3) 取得 dataset iterator，並把每段 clip 的 lengths 設為 frames_per_clip
         iterator = iter(self.data)
         input_motion, model_kwargs = next(iterator)
         input_motion = input_motion.to(self.device)
         model_kwargs['y']['lengths'] = torch.tensor([frames_per_clip])
 
-        all_motions_rep = []     # 存放每段 clip 在 model representation 上 (frames_per_clip, J, F)
-        prev_last_rep_overlap = None  # 暫存「上一段最後 overlap_frames 幀的 representation」
+        all_motions_rep = []    # 儲存每段「刪除 30 幀後」的 representation (frames_per_clip - 30, J, F)
+        prev_overlap_rep = None # 暫存上一段「刪除 10 後倒數 20 幀」 → (J, F, supply_frames)
 
         for i in range(num_clips):
             print(f"[Clip {i+1}/{num_clips}] \"{sub_prompts[i]}\"")
-            # 設定文字條件 & CFG scale
             model_kwargs['y']['text'] = [sub_prompts[i]]
             model_kwargs['y']['scale'] = torch.tensor(
                 [self.args.guidance_param], device=self.device
             )
 
             if i == 0:
-                # 第一段 clip：全新生成 frames_per_clip 幀
+                # 第一段 clip：直接生成完整 frames_per_clip 幀
                 sample_rep = self.diffusion.p_sample_loop(
                     self.model,
                     (1, self.model.njoints, self.model.nfeats, frames_per_clip),
@@ -100,17 +100,16 @@ class LongMotionGenerator:
                     progress=True,
                 )
             else:
-                # 後續段 clip：用上一段最後 overlap_frames 幀 inpainting
+                # 後續段：inpaint 前 supply_frames 幀
                 inpainted = torch.zeros(
                     (1, self.model.njoints, self.model.nfeats, frames_per_clip),
                     device=self.device
                 )
-                # 將上一段最後 overlap_frames 幀放到這一段的前面
-                # prev_last_rep_overlap shape = (J, F, overlap_frames)
-                inpainted[..., 0:self.overlap_frames] = prev_last_rep_overlap
+                # prev_overlap_rep shape = (J, F, supply_frames)
+                inpainted[..., 0:self.supply_frames] = prev_overlap_rep
 
                 mask = torch.zeros_like(inpainted, dtype=torch.bool)
-                mask[..., 0:self.overlap_frames] = True
+                mask[..., 0:self.supply_frames] = True
 
                 model_kwargs['y']['inpainted_motion'] = inpainted
                 model_kwargs['y']['inpainting_mask'] = mask
@@ -124,41 +123,40 @@ class LongMotionGenerator:
                     progress=True,
                 )
 
-            # 4) 將 sample_rep 移到 CPU 並擷取最後 overlap_frames 幀供下一段使用
+            # 4) 移到 CPU 並轉 numpy
             sample_rep = sample_rep.cpu()  # shape: (1, J, F, frames_per_clip)
-            prev_last_rep_overlap = sample_rep[0][..., -self.overlap_frames:].clone()
+            clip_rep_full = sample_rep.permute(0, 3, 1, 2).squeeze(0).numpy()  # (frames_per_clip, J, F)
 
-            # 5) 把 sample_rep 轉成 numpy (frames_per_clip, J, F)，放到 all_motions_rep
-            clip_rep = sample_rep.permute(0, 3, 1, 2).squeeze(0).numpy()  # shape: (frames_per_clip, J, F)
-            all_motions_rep.append(clip_rep)
+            # 5) 從「刪掉 10 幀後剩下部分」取倒數 20 幀，供下一段 inpaint
+            truncated_after_delete = clip_rep_full[:-self.delete_frames]  # shape = (frames_per_clip-delete, J, F)
+            # 取倒數 20 幀： indices [ -supply_frames : ]
+            overlap = truncated_after_delete[-self.supply_frames:]  # shape = (supply_frames, J, F)
+            # 變成 (J, F, supply_frames) 方便下一 loop 塞入 inpainted
+            prev_overlap_rep = np.transpose(overlap, (1, 2, 0))
+            prev_overlap_rep = torch.from_numpy(prev_overlap_rep).to(self.device)
 
-        # 6) 所有 clip 生成完後，在 representation 空間做「刪掉前一段 clip 的後 overlap_frames 幀」再拼接
-        merged_rep = []
-        for idx in range(num_clips):
-            if idx < num_clips - 1:
-                # 如果不是最後一段，就取這一段除去「最後 overlap_frames 幀」(避免下一段重複)
-                merged_rep.append(all_motions_rep[idx][:-self.overlap_frames])
-            else:
-                # 最後一段保留完整
-                merged_rep.append(all_motions_rep[idx])
+            # 6) 再把 trunc_after_delete 刪掉最後那 20 幀 → truncated_to_store
+            truncated_to_store = truncated_after_delete[:-self.supply_frames]  
+            # shape = (frames_per_clip - delete_frames - supply_frames, J, F)
 
-        # 合併所有段落
-        full_rep = np.concatenate(merged_rep, axis=0)  # shape = (T_total, J, F)
+            # 7) 把這段「已刪 10 + 刪 20 重疊」的部分存到 all_motions_rep
+            all_motions_rep.append(truncated_to_store)
 
-        # 7) 根據 data_rep 還原成 XYZ
+        # 8) 合併所有段落（它們都已經被刪掉 30 幀）
+        full_rep = np.concatenate(all_motions_rep, axis=0)  # shape = (T_total, J, F)
+
+        # 9) 根據 data_rep 還原到 XYZ
         if self.model.data_rep == 'hml_vec':
             T_total = full_rep.shape[0]
-            # full_rep → tensor 形狀 (1, T_total, J*F)
             rep_tensor = torch.from_numpy(full_rep).reshape(1, T_total, -1).float()
-            # inv_transform → (1, T_total, J*3)，再 recover → (1, T_total, J, 3)
             rep_xyz = self.data.dataset.t2m_dataset.inv_transform(rep_tensor).float()
             n_joints = 22 if rep_xyz.shape[2] // 3 == 263 // 3 else 21
-            rep_xyz = recover_from_ric(rep_xyz, n_joints).numpy()[0]  # shape: (T_total, J, 3)
+            rep_xyz = recover_from_ric(rep_xyz, n_joints).numpy()[0]  # (T_total, J, 3)
         else:
             # 如果 data_rep 已經是 'xyz'，full_rep 本身就是 (T_total, J, 3)
             rep_xyz = full_rep
 
-        # 8) 最後一次呼叫 plot_3d_motion 寫出長影片
+        # 10) 一次呼叫 plot_3d_motion 寫出長影片
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         print(f"[LongMotionGenerator] Writing final video ({rep_xyz.shape[0]} frames) to: {output_path}")
         plot_3d_motion(
@@ -183,13 +181,15 @@ if __name__ == "__main__":
 
     gen = LongMotionGenerator(args)
     prompt = (
-        "A person stands still for a moment, takes a few quick steps backward, suddenly crouches down, and stands up again, rolls sideways to the left while extending their right arm forward."
+        "A person runs forward with quick steps, transitions into a spinning turn to the left, "
+        "immediately jumps into the air with arms extended, and lands smoothly before continuing "
+        "with a side step to the right."
     )
 
-    # 範例：想用每段 5 秒（= 5 * fps 幀），總長 20 秒 → 20 ÷ 5 = 4 段 clip
+    # 例：每段 6 秒 → frames_per_clip = 6 * fps，總長 30 秒 → 5 段 clip
     gen.generate_from_prompt(
         text_prompt=prompt,
         duration_seconds=30,
-        per_clip_seconds=6,
-        output_path="./outputs/long_dance_clip.mp4"
+        per_clip_seconds=6.0,
+        output_path="./outputs/long_dance_clip_modified_fix.mp4"
     )

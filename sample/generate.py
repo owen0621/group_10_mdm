@@ -215,13 +215,15 @@ def main(args=None):
     sample_file_template, row_file_template, all_file_template = construct_template_variables(args.unconstrained)
     max_vis_samples = 6
     num_vis_samples = min(args.num_samples, max_vis_samples)
-    animations = np.empty(shape=(3, 3), dtype=object)
-    # animations = np.empty(shape=(args.num_samples, args.num_repetitions), dtype=object) #原版本
+    # animations = np.empty(shape=(3, 3), dtype=object)
+    animations = np.empty(shape=(args.num_samples, args.num_repetitions), dtype=object) #原版本
     max_length = max(all_lengths)
 
+    print(args.num_samples, args.num_repetitions)
     for sample_i in range(args.num_samples):
         rep_files = []
         for rep_i in range(args.num_repetitions):
+            print(sample_i, rep_i)
             caption = all_text[rep_i*args.batch_size + sample_i]
             if args.dynamic_text_path != '':  # caption per frame
                 assert type(caption) == list
@@ -247,7 +249,7 @@ def main(args=None):
 
     #TODO
     total_samples = args.num_samples * args.num_repetitions
-    animations = animations.reshape(total_samples // 3, 3)
+    animations = animations.reshape(args.num_repetitions, args.num_samples)
     save_multiple_samples(out_path, {'all': all_file_template}, animations, fps, max(list(all_lengths) + [n_frames]))
 
     abs_path = os.path.abspath(out_path)

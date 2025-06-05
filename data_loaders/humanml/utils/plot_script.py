@@ -25,16 +25,16 @@ def list_cut_average(ll, intervals):
     return ll_new
 
 
-def plot_3d_motion(save_path, kinematic_tree, joints, title, dataset, figsize=(3, 3), fps=120, radius=3,
+def plot_3d_motion(save_path, kinematic_tree, joints, title, dataset, figsize=(3, 4), fps=120, radius=3,
                    vis_mode='default', gt_frames=[]):
     matplotlib.use('Agg')
 
     title_per_frame = type(title) == list
     if title_per_frame:
         assert len(title) == len(joints), 'Title length should match the number of frames'
-        title = ['\n'.join(wrap(s, 20)) for s in title]
+        title = ['\n'.join(wrap(s, 50)) for s in title]
     else:
-        title = '\n'.join(wrap(title, 20))
+        title = '\n'.join(wrap(title, 50))
 
     def init():
         ax.set_xlim3d([-radius / 2, radius / 2])
@@ -110,7 +110,7 @@ def plot_3d_motion(save_path, kinematic_tree, joints, title, dataset, figsize=(3
         else:
             _title = title
         _title += f' [{index}]'
-        fig.suptitle(_title, fontsize=10)
+        fig.suptitle(_title, fontsize=8)
 
         plot_xzPlane(MINS[0] - trajec[index, 0], MAXS[0] - trajec[index, 0], 0, MINS[2] - trajec[index, 1],
                      MAXS[2] - trajec[index, 1])
